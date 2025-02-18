@@ -13,6 +13,14 @@ from resolution_utils import DEVMODEW, change_resolution_refresh, reset_resoluti
 
 def get_game_name(game_path):
     return os.path.basename(game_path)
+def get_resource_path(relative_path):
+    """Get absolute path to resource, works for dev and for PyInstaller"""
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
 
 class GameResolutionChanger(QWidget):
     def __init__(self):
@@ -34,7 +42,8 @@ class GameResolutionChanger(QWidget):
 
     def initUI(self):
         self.setWindowTitle("Gaming Adaptive Display")
-        self.setWindowIcon(QIcon("icon.png"))  # Set the window's icon
+        icon_path = get_resource_path("icon.png")
+        self.setWindowIcon(QIcon(icon_path))  # Set the window's icon
 
         self.setGeometry(100, 100, 450, 450)
         self.setStyleSheet("""
@@ -162,7 +171,8 @@ class GameResolutionChanger(QWidget):
 
     def init_tray(self):
         self.tray_icon = QSystemTrayIcon(self)
-        self.tray_icon.setIcon(QIcon("icon.png"))
+        icon_path = get_resource_path("icon.png")
+        self.tray_icon.setIcon(QIcon(icon_path))
         self.tray_icon.setVisible(True)
 
         tray_menu = QMenu()
@@ -342,6 +352,12 @@ class GameResolutionChanger(QWidget):
             return False
 
 if __name__ == "__main__":
+    from PyQt6.QtCore import QLockFile, QDir  # new import for single instance check
+    lock_file = QLockFile(QDir.tempPath() + "/GamingAdaptiveDisplay.lock")  # create lock file in temp directory
+    if not lock_file.tryLock(100):  # attempt to acquire lock
+        print("Application already running.")
+        import sys
+        sys.exit(0)
     app = QApplication(sys.argv)
     window = GameResolutionChanger()
     window.show()
