@@ -2,3 +2,5 @@ game_config.json
 /dist
 /build
 /__pycache__
+/.vscode
+/installer
