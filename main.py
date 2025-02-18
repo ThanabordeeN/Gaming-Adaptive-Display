@@ -1,13 +1,14 @@
 import sys
-from PyQt6.QtWidgets import (
-    QApplication, QWidget, QLabel, QComboBox, QPushButton, QVBoxLayout,
-    QHBoxLayout, QFileDialog, QListWidget, QGroupBox, QTextEdit
-)
-from PyQt6.QtCore import QTimer, Qt
-import psutil
 import os
 import json
-# Import the new module
+import psutil
+import winreg  # For Windows registry operations
+from PyQt6.QtWidgets import (
+    QApplication, QWidget, QLabel, QComboBox, QPushButton, QVBoxLayout,
+    QHBoxLayout, QFileDialog, QListWidget, QGroupBox, QTextEdit, QMenu, QSystemTrayIcon, QCheckBox
+)
+from PyQt6.QtGui import QIcon, QAction
+from PyQt6.QtCore import QTimer, Qt
 from resolution_utils import DEVMODEW, change_resolution_refresh, reset_resolution_refresh, get_current_resolution_refresh
 
 def get_game_name(game_path):
@@ -28,11 +29,14 @@ class GameResolutionChanger(QWidget):
         except json.JSONDecodeError:
             print("Error reading config file, starting with empty lists")
         self.initUI()
+        self.init_tray()
         self.watch_dog()
 
     def initUI(self):
         self.setWindowTitle("Gaming Adaptive Display")
-        self.setGeometry(100, 100, 450, 400)
+        self.setWindowIcon(QIcon("icon.png"))  # Set the window's icon
+
+        self.setGeometry(100, 100, 450, 450)
         self.setStyleSheet("""
             QWidget {
                 font-family: Arial;
@@ -63,7 +67,6 @@ class GameResolutionChanger(QWidget):
         game_select_layout.addWidget(self.game_combo)
         game_select_layout.addWidget(self.browse_button)
 
-        # --- Added Remove Button ---
         self.remove_button = QPushButton("Remove")
         self.remove_button.setToolTip("Remove selected game from monitored list")
         self.remove_button.clicked.connect(self.remove_game)
@@ -77,9 +80,7 @@ class GameResolutionChanger(QWidget):
         game_layout.addLayout(game_select_layout)
         game_layout.addWidget(QLabel("Monitored Games:"))
         game_layout.addWidget(self.listed_games)
-        # --- Added Remove Button into layout ---
         game_layout.addWidget(self.remove_button)
-        # -----------------------------------------
         game_group.setLayout(game_layout)
 
         # Resolution selection group
@@ -88,26 +89,54 @@ class GameResolutionChanger(QWidget):
 
         self.resolution_combo = QComboBox()
         self.resolution_combo.setToolTip("Select desired resolution and refresh rate")
-        self.resolution_combo.addItems([
-            "3840x2160 @ 165Hz", # 4K
-            "3440x1440 @ 165Hz", # Ultrawide 1440p
-            "2560x1440 @ 165Hz", # 1440p
-            "1920x1080 @ 165Hz", # 1080p
-            "1680x1050 @ 165Hz", # WSXGA+
-            "1600x900 @ 165Hz",  # HD+
-            "1440x900 @ 165Hz",  # WXGA+
-            "1366x768 @ 165Hz",  # HD
-            "1280x1024 @ 165Hz", # SXGA
-            "1280x800 @ 165Hz",  # WXGA
-            "1280x720 @ 165Hz",  # 720p
-            "1024x768 @ 165Hz",  # XGA
-            "800x600 @ 165Hz",   # SVGA
-            "640x480 @ 165Hz"    # VGA
-        ])
+        
+        # Get current resolution and refresh rate
+        current_width, current_height, current_refresh = get_current_resolution_refresh()
+        
+        # Common resolutions
+        resolutions = [
+            "3840x2160", # 4K
+            "3440x1440", # Ultrawide 1440p
+            "2560x1440", # 1440p
+            "1920x1080", # 1080p
+            "1680x1050", # WSXGA+
+            "1600x900",  # HD+
+            "1440x900",  # WXGA+
+            "1366x768",  # HD
+            "1280x1024", # SXGA
+            "1280x800",  # WXGA
+            "1280x720",  # 720p
+            "1024x768",  # XGA
+            "800x600",   # SVGA
+            "640x480"    # VGA
+        ]
+        
+        # Common refresh rates
+        refresh_rates = ["60", "75", "120", "144", "165", "240"]
+        self.refresh_rates_combo = QComboBox()
+        self.refresh_rates_combo.addItems(refresh_rates)
 
+        
+        # Generate all combinations
+        self.resolution_combo.addItems(resolutions)
+        
+        # Set current resolution as default
+        current_resolution = f"{current_width}x{current_height} @ {current_refresh}Hz"
+        index = self.resolution_combo.findText(current_resolution)
+        if index >= 0:
+            self.resolution_combo.setCurrentIndex(index)
+        
         res_layout.addWidget(QLabel("Select Resolution:"))
         res_layout.addWidget(self.resolution_combo)
+        res_layout.addWidget(QLabel("Select refresh rate:"))
+        res_layout.addWidget(self.refresh_rates_combo)
         res_group.setLayout(res_layout)
+
+        # Run at startup checkbox
+        self.startup_checkbox = QCheckBox("Run at Startup")
+        self.startup_checkbox.setToolTip("Automatically start the app when Windows starts")
+        self.startup_checkbox.setChecked(self.is_run_at_startup_enabled())
+        self.startup_checkbox.stateChanged.connect(self.toggle_run_at_startup)
 
         # Apply & status section
         self.apply_button = QPushButton("Apply")
@@ -118,7 +147,6 @@ class GameResolutionChanger(QWidget):
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_label.setStyleSheet("color: green;")
 
-        # Status log text area (optional)
         self.status_log = QTextEdit()
         self.status_log.setReadOnly(True)
         self.status_log.setToolTip("Logs and messages")
@@ -126,10 +154,40 @@ class GameResolutionChanger(QWidget):
 
         main_layout.addWidget(game_group)
         main_layout.addWidget(res_group)
+        main_layout.addWidget(self.startup_checkbox)
         main_layout.addWidget(self.apply_button)
         main_layout.addWidget(self.status_label)
         main_layout.addWidget(self.status_log)
         self.setLayout(main_layout)
+
+    def init_tray(self):
+        self.tray_icon = QSystemTrayIcon(self)
+        self.tray_icon.setIcon(QIcon("icon.png"))
+        self.tray_icon.setVisible(True)
+
+        tray_menu = QMenu()
+        restore_action = QAction("Restore", self)
+        restore_action.triggered.connect(self.show_normal)
+        exit_action = QAction("Exit", self)
+        exit_action.triggered.connect(QApplication.quit)
+        tray_menu.addAction(restore_action)
+        tray_menu.addAction(exit_action)
+        self.tray_icon.setContextMenu(tray_menu)
+
+    def show_normal(self):
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def closeEvent(self, event):
+        event.ignore()
+        self.hide()
+        self.tray_icon.showMessage(
+            "Application Minimized",
+            "The app is still running in the background. Double-click the tray icon to restore.",
+            QSystemTrayIcon.MessageIcon.Information,
+            2000
+        )
 
     def browse_game(self):
         game_path, _ = QFileDialog.getOpenFileName(self, "Select Game", "", "Executable Files (*.exe)")
@@ -156,7 +214,7 @@ class GameResolutionChanger(QWidget):
         current_game = selected_items[0].text().split(" (")[0]
         current_row = self.listed_games.row(selected_items[0])
         self.listed_games.takeItem(current_row)
-        self.listed_games.insertItem(current_row, f"{current_game} ({self.resolution_combo.currentText()})")
+        self.listed_games.insertItem(current_row, f"{current_game} ({self.resolution_combo.currentText()} @ {self.refresh_rates_combo.currentText()}Hz)")
 
         current_game_path = next((game_path["game"] for game_path in self.list_of_applied_games if get_game_name(game_path["game"]) == current_game), None)        
         if not current_game_path:
@@ -164,7 +222,7 @@ class GameResolutionChanger(QWidget):
             self.status_label.setText("Error: Game path cannot be empty!")
             return
 
-        resolution = self.resolution_combo.currentText()
+        resolution = f"{self.resolution_combo.currentText()} @ {self.refresh_rates_combo.currentText()}Hz"
         game_exists = False
         game_index = -1
 
@@ -175,7 +233,6 @@ class GameResolutionChanger(QWidget):
                 break
 
         if game_exists:
-            # Game exists, edit the resolution
             if self.list_of_applied_games[game_index]["resolution"] == resolution:
                 self.status_label.setStyleSheet("color: red;")
                 self.status_label.setText("Error: Resolution already applied for this game!")
@@ -184,7 +241,6 @@ class GameResolutionChanger(QWidget):
             status_message = f"Updated resolution to {resolution} for {current_game_path}"
             log_message = f"Updated {current_game_path} with resolution {resolution}."
         else:
-            # Game doesn't exist, add new entry
             self.list_of_applied_games.append({
                 "game": current_game_path,
                 "resolution": resolution
@@ -195,7 +251,6 @@ class GameResolutionChanger(QWidget):
             if game_name not in self.list_of_game:
                 self.list_of_game.append(game_name)
                 self.listed_games.addItem(game_name)
-
 
         with open("./game_config.json", "w") as f:
             json.dump({"games": self.list_of_applied_games}, f)
@@ -212,17 +267,13 @@ class GameResolutionChanger(QWidget):
 
         for item in selected_items:
             game_name = item.text()
-            # Remove from list widget.
             row = self.listed_games.row(item)
             self.listed_games.takeItem(row)
-            # Remove from in-memory game list.
             if game_name in self.list_of_game:
                 self.list_of_game.remove(game_name)
-            # Remove any entries in applied games matching this game.
             self.list_of_applied_games = [g for g in self.list_of_applied_games if get_game_name(g["game"]) != game_name]
             self.status_log.append(f"Removed {game_name} from the monitored list.")
 
-        # Update config file.
         with open("./game_config.json", "w") as f:
             json.dump({"games": self.list_of_applied_games}, f)
         self.status_label.setStyleSheet("color: green;")
@@ -238,14 +289,12 @@ class GameResolutionChanger(QWidget):
         game_running = False
         for game in self.list_of_applied_games:
             game_name = get_game_name(game["game"])
-            # Check if game is running
             for process in psutil.process_iter(['name']):
                 try:
                     if process.info['name'].lower() == game_name.lower():
                         res = game["resolution"].split(" @ ")
                         width, height = map(int, res[0].split("x"))
                         refresh_rate = int(res[1].replace("Hz", ""))
-                        # Change resolution if not applied yet
                         if not self.resolution_changed:
                             self.resolution_changed = change_resolution_refresh(width, height, refresh_rate)
                             if self.resolution_changed:
@@ -260,6 +309,37 @@ class GameResolutionChanger(QWidget):
             if reset_resolution_refresh():
                 self.status_log.append("Reset to default resolution as no monitored game is running.")
             self.resolution_changed = False
+
+    def toggle_run_at_startup(self, state):
+        enabled = state == Qt.CheckState.Checked.value
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                 r"Software\Microsoft\Windows\CurrentVersion\Run",
+                                 0, winreg.KEY_SET_VALUE)
+            app_path = f'"{sys.executable}" "{os.path.abspath(__file__)}"'
+            if enabled:
+                winreg.SetValueEx(key, "GamingAdaptiveDisplay", 0, winreg.REG_SZ, app_path)
+                self.status_log.append("Enabled run at startup.")
+            else:
+                try:
+                    winreg.DeleteValue(key, "GamingAdaptiveDisplay")
+                    self.status_log.append("Disabled run at startup.")
+                except FileNotFoundError:
+                    pass
+            winreg.CloseKey(key)
+        except Exception as e:
+            self.status_log.append(f"Error updating startup setting: {e}")
+
+    def is_run_at_startup_enabled(self):
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                 r"Software\Microsoft\Windows\CurrentVersion\Run",
+                                 0, winreg.KEY_READ)
+            value, _ = winreg.QueryValueEx(key, "GamingAdaptiveDisplay")
+            winreg.CloseKey(key)
+            return os.path.abspath(__file__) in value
+        except Exception:
+            return False
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
